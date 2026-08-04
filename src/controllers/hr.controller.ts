@@ -48,6 +48,7 @@ async function loadBdes(tenantId?: string, role?: string) {
       monthlyTarget: profile?.monthlyTarget || 30,
       targetType: profile?.targetType || 'leads',
       commissionPercentage: profile?.commissionPercentage || 5,
+      commissionEnabled: profile?.commissionEnabled || false,
       status: profile?.status || 'active',
     };
   });
@@ -55,8 +56,9 @@ async function loadBdes(tenantId?: string, role?: string) {
 
 export const getHROverview = async (req: AuthRequest, res: Response) => {
   try {
-    const isAdmin = req.user?.role === 'super_admin' || req.user?.role === 'owner';
-    const staffFilter = isAdmin ? {} : tenantFilter(req.user?.tenantId);
+    const isSuperAdmin = req.user?.role === 'super_admin';
+    // Owners must stay tenant-scoped — otherwise payroll lists trainers from every center.
+    const staffFilter = isSuperAdmin ? {} : tenantFilter(req.user?.tenantId);
     const persistFilter = tenantFilter(req.user?.tenantId);
     const month = (req.query.month as string) || currentMonthPrefix();
 
@@ -66,7 +68,7 @@ export const getHROverview = async (req: AuthRequest, res: Response) => {
         loadBdes(req.user?.tenantId, req.user?.role),
         Batch.find(staffFilter),
         Attendance.find(
-          isAdmin
+          isSuperAdmin
             ? { type: { $in: ['trainer', 'bde'] } }
             : { ...persistFilter, type: { $in: ['trainer', 'bde'] } }
         ),
@@ -102,7 +104,7 @@ export const getHROverview = async (req: AuthRequest, res: Response) => {
       substituteTrainerName: s.substituteTrainerName,
       conflictWarning: s.conflictWarning,
     }));
-    const schedules = buildSchedules(batchPayload as any, substitutePayload);
+    const schedules = buildSchedules(batchPayload as any, substitutePayload, trainerPayload as any);
     const autoDrafts = buildAutoPayrollDrafts(employees, rules, month);
 
     const payroll = autoDrafts.map((draft) => {
@@ -121,6 +123,8 @@ export const getHROverview = async (req: AuthRequest, res: Response) => {
         incentiveAdd: stored.incentiveAdd,
         grossPayout: stored.grossPayout,
         netPayout: stored.netPayout,
+        unpaidDays: draft.unpaidDays,
+        lateDays: draft.lateDays,
         status: stored.status,
         timeline: stored.timeline,
       };
@@ -186,33 +190,69 @@ export const getHROverview = async (req: AuthRequest, res: Response) => {
 
 export const submitPayroll = async (req: AuthRequest, res: Response) => {
   try {
-    const payload = { ...req.body, tenantId: req.user?.tenantId };
+    const {
+      employeeId,
+      employeeType,
+      month,
+      baseSalary,
+      lateArrivalDeduction,
+      unpaidLeaveDeduction,
+      overtimeAdd,
+      commissionAdd,
+      incentiveAdd,
+      grossPayout,
+      netPayout,
+    } = req.body;
+
+    if (!employeeId || !month) {
+      return res.status(400).json({ message: 'employeeId and month are required' });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    const snapshot = {
+      employeeId: String(employeeId),
+      employeeType: (employeeType === 'bde' ? 'bde' : 'trainer') as 'trainer' | 'bde',
+      month: String(month),
+      baseSalary: Number(baseSalary) || 0,
+      lateArrivalDeduction: Number(lateArrivalDeduction) || 0,
+      unpaidLeaveDeduction: Number(unpaidLeaveDeduction) || 0,
+      overtimeAdd: Number(overtimeAdd) || 0,
+      commissionAdd: Number(commissionAdd) || 0,
+      incentiveAdd: Number(incentiveAdd) || 0,
+      grossPayout: Number(grossPayout) || 0,
+      netPayout: Number(netPayout) || 0,
+      tenantId: req.user?.tenantId,
+    };
+
     const existing = await HRPayroll.findOne({
-      employeeId: payload.employeeId,
-      month: payload.month,
+      employeeId: snapshot.employeeId,
+      month: snapshot.month,
       ...tenantFilter(req.user?.tenantId),
     });
+
     if (existing) {
+      Object.assign(existing, snapshot);
       existing.status = 'Pending Approval';
       existing.timeline = [
         ...(existing.timeline || []),
         {
-          title: 'Draft Generated',
-          date: new Date().toISOString().split('T')[0],
-          description: 'Auto attendance checks run successfully.',
+          title: 'Submitted for approval',
+          date: today,
+          description: `Snapshot saved · net ₹${snapshot.netPayout.toLocaleString('en-IN')}`,
         },
       ];
       await existing.save();
       return res.status(200).json({ ...existing.toObject(), id: existing._id });
     }
+
     const created = await HRPayroll.create({
-      ...payload,
+      ...snapshot,
       status: 'Pending Approval',
       timeline: [
         {
-          title: 'Draft Generated',
-          date: new Date().toISOString().split('T')[0],
-          description: 'Auto attendance checks run successfully.',
+          title: 'Submitted for approval',
+          date: today,
+          description: `Auto-calculated from attendance, batches, and commission rules · net ₹${snapshot.netPayout.toLocaleString('en-IN')}`,
         },
       ],
     });

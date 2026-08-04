@@ -2,13 +2,60 @@ import { Response } from 'express';
 import Attendance from '../models/Attendance';
 import Student from '../models/Student';
 import User from '../models/User';
+import Trainer from '../models/Trainer';
+import BDEProfile from '../models/BDEProfile';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { buildShiftPayload } from '../utils/shiftTimer';
+import { buildShiftPayload, parseManualShiftTime } from '../utils/shiftTimer';
 import { tenantFilter } from '../utils/bdeStats';
+
+function todayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function wasPresentOrPunched(record: {
+  status?: string;
+  loginTime?: string;
+  shiftStatus?: string;
+} | null | undefined) {
+  if (!record) return false;
+  if (record.status === 'present' || record.status === 'late') return true;
+  if (record.loginTime) return true;
+  if (record.shiftStatus === 'active' || record.shiftStatus === 'paused' || record.shiftStatus === 'finished') {
+    return true;
+  }
+  return false;
+}
+
+async function listStaffForType(tenantId: string | undefined, type: string, role?: string) {
+  if (type === 'trainer') {
+    const filter =
+      role === 'super_admin' || !tenantId ? {} : { tenantId: tenantFilter(tenantId) };
+    const trainers = await Trainer.find(filter);
+    return trainers
+      .filter((t) => String(t.status || 'Active').toLowerCase() !== 'inactive')
+      .map((t) => ({ entityId: t._id.toString(), name: t.name }));
+  }
+
+  if (type === 'bde') {
+    const userFilter: Record<string, unknown> = { role: 'bde' };
+    if (role !== 'super_admin' && tenantId) userFilter.tenantId = tenantId;
+    const users = await User.find(userFilter);
+    const profiles = await BDEProfile.find({ userId: { $in: users.map((u) => u._id) } });
+    return users
+      .filter((u) => {
+        const profile = profiles.find((p) => p.userId.toString() === u._id.toString());
+        return (profile?.status || 'active') !== 'inactive';
+      })
+      .map((u) => ({ entityId: u._id.toString(), name: u.name }));
+  }
+
+  return [];
+}
 
 export const getAttendance = async (req: AuthRequest, res: Response) => {
   try {
-    const { date, type, entityId } = req.query;
+    const { date, type, entityId, month } = req.query;
 
     const filter: any = {};
 
@@ -44,11 +91,17 @@ export const getAttendance = async (req: AuthRequest, res: Response) => {
         if (req.user?.tenantId && req.user.role !== 'super_admin') {
           filter.tenantId = tenantFilter(req.user.tenantId);
         }
-        if (!date || !type) {
-          return res.status(400).json({ message: 'date and type query parameters are required' });
+        if (!type) {
+          return res.status(400).json({ message: 'type query parameter is required' });
         }
-        filter.date = date;
         filter.type = type;
+        if (month && typeof month === 'string' && /^\d{4}-\d{2}$/.test(month)) {
+          filter.date = { $regex: `^${month}` };
+        } else if (date) {
+          filter.date = date;
+        } else {
+          return res.status(400).json({ message: 'date or month query parameter is required' });
+        }
       }
 
     const records = await Attendance.find(filter).sort({ date: -1, createdAt: -1 });
@@ -102,12 +155,10 @@ export const saveAttendance = async (req: AuthRequest, res: Response) => {
           update.shiftStatus = 'finished';
           if (loginTime) update.loginTime = loginTime;
           if (logoutTime) update.logoutTime = logoutTime;
-          if (loginTime && !existing?.loginAt) {
-            update.loginAt = new Date(`${date}T09:30:00`).toISOString();
-          }
-          if (logoutTime && !existing?.logoutAt) {
-            update.logoutAt = new Date(`${date}T18:30:00`).toISOString();
-          }
+          const parsedLogin = parseManualShiftTime(date, loginTime);
+          const parsedLogout = parseManualShiftTime(date, logoutTime);
+          if (parsedLogin) update.loginAt = parsedLogin;
+          if (parsedLogout) update.logoutAt = parsedLogout;
         }
       }
 
@@ -137,5 +188,86 @@ export const saveAttendance = async (req: AuthRequest, res: Response) => {
     );
   } catch (error) {
     res.status(500).json({ message: 'Error saving attendance records', error });
+  }
+};
+
+/**
+ * End-of-day close: for each past day in the month, staff who were not marked
+ * present/late and did not punch in are auto-marked absent.
+ */
+export const finalizeAttendanceMonth = async (req: AuthRequest, res: Response) => {
+  try {
+    const month = String(req.body.month || '');
+    const typeRaw = String(req.body.type || '');
+    if (!/^\d{4}-\d{2}$/.test(month) || !['trainer', 'bde'].includes(typeRaw)) {
+      return res.status(400).json({ message: 'month (YYYY-MM) and type (trainer|bde) are required' });
+    }
+
+    const type = typeRaw as 'trainer' | 'bde';
+    const tenantId = req.user?.tenantId || 'ERP';
+    const staff = await listStaffForType(req.user?.tenantId, type, req.user?.role);
+    if (staff.length === 0) {
+      return res.status(200).json({ markedAbsent: 0, records: [] });
+    }
+
+    const [y, m] = month.split('-').map(Number);
+    const daysInMonth = new Date(y, m, 0).getDate();
+    const today = todayIso();
+    const filter: Record<string, unknown> = {
+      type,
+      date: { $regex: `^${month}` },
+    };
+    if (req.user?.tenantId && req.user.role !== 'super_admin') {
+      filter.tenantId = tenantFilter(req.user.tenantId);
+    }
+    const existing = await Attendance.find(filter);
+    const byKey = new Map(existing.map((r) => [`${r.date}:${r.entityId}`, r]));
+
+    let markedAbsent = 0;
+    const created: typeof existing = [];
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = `${month}-${String(day).padStart(2, '0')}`;
+      if (date >= today) continue; // only past days (EOD already passed)
+
+      for (const person of staff) {
+        const key = `${date}:${person.entityId}`;
+        const record = byKey.get(key);
+        if (wasPresentOrPunched(record)) continue;
+        if (record?.status === 'absent') continue;
+
+        const updated = await Attendance.findOneAndUpdate(
+          { tenantId, date, type, entityId: person.entityId },
+          {
+            name: person.name,
+            status: 'absent',
+            ...(type === 'bde'
+              ? {
+                  shiftStatus: 'offline',
+                  loginTime: '',
+                  logoutTime: '',
+                  loginAt: null,
+                  logoutAt: null,
+                  pausedAt: null,
+                  totalPausedSeconds: 0,
+                }
+              : {}),
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+        if (updated) {
+          markedAbsent += 1;
+          created.push(updated);
+          byKey.set(key, updated);
+        }
+      }
+    }
+
+    res.status(200).json({
+      markedAbsent,
+      records: created.map((r) => ({ ...r.toObject(), id: r._id.toString() })),
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error finalizing attendance month', error });
   }
 };

@@ -58,9 +58,11 @@ type BdeRecord = {
   monthlyTarget?: number;
   targetType?: string;
   commissionPercentage?: number;
+  commissionEnabled?: boolean;
   convertedLeads?: number;
   activeLeads?: number;
   revenueGenerated?: number;
+  status?: string;
 };
 
 const DEPT_COLORS: Record<string, string> = {
@@ -168,7 +170,9 @@ function attendanceForEntity(
   if (monthPrefix) {
     logs = logs.filter((l) => (l.date || '').startsWith(monthPrefix));
   }
-  if (!logs.length) return { pct: 100, absent: 0, late: 0, present: 0 };
+  if (!logs.length) {
+    return { pct: null as number | null, absent: 0, late: 0, present: 0, loggedDays: 0, hasLogs: false };
+  }
   const present = logs.filter((l) => l.status === 'present' || l.status === 'late').length;
   const absent = logs.filter((l) => l.status === 'absent').length;
   const late = logs.filter((l) => l.status === 'late').length;
@@ -177,6 +181,8 @@ function attendanceForEntity(
     absent,
     late,
     present,
+    loggedDays: logs.length,
+    hasLogs: true,
   };
 }
 
@@ -214,20 +220,69 @@ function computePayrollPreview(
   emp: ReturnType<typeof buildEmployees>[number],
   rule: ReturnType<typeof defaultCommissionRule> | undefined,
   batchCount: number,
-  studentCount: number
+  studentCount: number,
+  leadRevenue = 0
 ) {
   const unpaidDays = emp.leaveBalance.unpaid;
   const dailyRate = Math.round(emp.baseSalary / 30);
   const unpaidDeduction = unpaidDays * dailyRate;
-  const lateDays = emp.attendancePct < 90 ? 3 : emp.attendancePct < 95 ? 1 : 0;
+
+  // Use real late marks when attendance exists; otherwise no late/OT assumptions
+  const lateDays = emp.hasAttendanceLogs ? emp.lateCount : 0;
   const lateDeduction = lateDays * 500;
-  const overtime = emp.attendancePct > 95 ? 1500 : 0;
-  const comm = rule
-    ? rule.perBatchPayout * batchCount + rule.perStudentPayout * studentCount
-    : 0;
-  const inc = emp.performanceScore > 4.5 ? 3000 : emp.performanceScore > 4 ? 1500 : 0;
-  const net = emp.baseSalary + emp.allowance + overtime + comm + inc - unpaidDeduction - lateDeduction;
-  return { unpaidDays, unpaidDeduction, lateDays, lateDeduction, overtime, comm, inc, net };
+  const overtime =
+    emp.hasAttendanceLogs && emp.attendancePct != null && emp.attendancePct > 95 ? 1500 : 0;
+
+  let batchCommission = 0;
+  let attendanceBonus = 0;
+  let feedbackBonus = 0;
+  let retentionBonus = 0;
+  if (rule && emp.role === 'Trainer') {
+    batchCommission = rule.perBatchPayout * batchCount + rule.perStudentPayout * studentCount;
+    if (
+      emp.hasAttendanceLogs &&
+      emp.attendancePct != null &&
+      emp.attendancePct >= rule.attendanceBonusThreshold
+    ) {
+      attendanceBonus = rule.attendanceBonusAmount;
+    }
+    if (emp.performanceScore >= rule.studentFeedbackBonusThreshold) {
+      feedbackBonus = rule.studentFeedbackBonusAmount;
+    }
+    if (emp.performanceScore >= 4.5 && batchCount >= 2) {
+      retentionBonus = Math.round(emp.baseSalary * (rule.retentionIncentivePct / 100));
+    }
+  }
+
+  // BDE: commission from converted lead revenue when enabled
+  let salesCommission = 0;
+  if (emp.role === 'BDE' && emp.commissionEnabled && emp.commissionPercentage > 0) {
+    salesCommission = Math.round(leadRevenue * (emp.commissionPercentage / 100));
+  }
+
+  const performanceIncentive =
+    emp.performanceScore > 4.5 ? 3000 : emp.performanceScore > 4 ? 1500 : 0;
+
+  const comm = batchCommission + salesCommission;
+  const inc = performanceIncentive + attendanceBonus + feedbackBonus + retentionBonus;
+  const net =
+    emp.baseSalary + emp.allowance + overtime + comm + inc - unpaidDeduction - lateDeduction;
+
+  return {
+    unpaidDays,
+    unpaidDeduction,
+    lateDays,
+    lateDeduction,
+    overtime,
+    comm,
+    inc,
+    attendanceBonus,
+    feedbackBonus,
+    retentionBonus,
+    salesCommission,
+    batchCommission,
+    net,
+  };
 }
 
 export function buildEmployees(
@@ -239,8 +294,14 @@ export function buildEmployees(
   monthPrefix = currentMonthPrefix()
 ) {
   const monthLeads = leadsInMonth(leads, monthPrefix);
+  const activeTrainers = trainers.filter((t) => {
+    const status = String((t as { status?: string }).status || 'Active').toLowerCase();
+    return status !== 'inactive';
+  });
+  const activeBdes = bdes.filter((b) => (b.status || 'active') === 'active');
+
   const employees = [
-    ...trainers.map((trainer) => {
+    ...activeTrainers.map((trainer) => {
       const id = String(trainer.id || trainer._id);
       const trainerName = (trainer.name || '').trim();
       const assignedBatches = batches.filter(
@@ -264,7 +325,10 @@ export function buildEmployees(
         branch,
         reportingManager: 'Center Admin',
         joiningDate: formatDateOnly(trainer.joiningDate),
-        attendancePct: att.pct,
+        attendancePct: att.pct ?? 0,
+        hasAttendanceLogs: att.hasLogs,
+        lateCount: att.late,
+        attendanceDays: att.loggedDays,
         leaveBalance: leaveBalanceFromAttendance(att.absent),
         bankDetails: {
           holder: trainer.bankHolderName || trainerName,
@@ -272,26 +336,35 @@ export function buildEmployees(
           account: maskAccount(trainer.bankAccountNumber),
           ifsc: trainer.ifscCode || 'N/A',
         },
-        performanceScore: trainer.rating || 4.5,
+        performanceScore: trainer.rating || 0,
         baseSalary: trainer.salaryRateAmount || 0,
         allowance: Math.round((trainer.salaryRateAmount || 0) * 0.06),
+        commissionEnabled: false,
+        commissionPercentage: 0,
         recentActivities: activities,
         batchCount: assignedBatches.length,
         studentCount: assignedBatches.reduce((sum, b) => sum + (b.studentNames?.length || b.enrolled || 0), 0),
         hoursThisWeek: trainer.hoursThisWeek || 0,
+        leadRevenue: 0,
+        convertedLeads: 0,
+        monthlyTarget: 0,
       };
     }),
-    ...bdes.map((bde) => {
+    ...activeBdes.map((bde) => {
       const id = String(bde.id);
       const bdeLeads = monthLeads.filter(
         (l) =>
           (l.counsellor || '').trim().toLowerCase() === (bde.name || '').trim().toLowerCase() ||
           l.assignedBdeId === id
       );
-      const converted = bdeLeads.filter((l) => l.stage === 'converted').length;
+      const convertedLeads = bdeLeads.filter((l) => l.stage === 'converted');
+      const converted = convertedLeads.length;
+      const leadRevenue = convertedLeads.reduce((sum, l) => sum + (Number(l.value) || 0), 0);
       const att = attendanceForEntity(attendanceRecords, id, 'bde', bde.name, monthPrefix);
       const target = bde.monthlyTarget || 30;
       const performanceScore = Math.min(5, Math.round((converted / Math.max(target, 1)) * 50) / 10);
+      const commissionEnabled = Boolean(bde.commissionEnabled);
+      const commissionPercentage = bde.commissionPercentage || 0;
 
       return {
         id,
@@ -303,7 +376,10 @@ export function buildEmployees(
         branch: 'Main Campus',
         reportingManager: 'Center Admin',
         joiningDate: bde.joiningDate || new Date().toISOString().split('T')[0],
-        attendancePct: att.pct,
+        attendancePct: att.pct ?? 0,
+        hasAttendanceLogs: att.hasLogs,
+        lateCount: att.late,
+        attendanceDays: att.loggedDays,
         leaveBalance: leaveBalanceFromAttendance(att.absent),
         bankDetails: {
           holder: bde.name || '',
@@ -313,11 +389,13 @@ export function buildEmployees(
         },
         performanceScore,
         baseSalary: bdeBaseSalary(bde),
-        allowance: Math.round((bde.commissionPercentage || 5) * 500),
+        allowance: commissionEnabled ? 0 : Math.round(Math.max(commissionPercentage, 5) * 500),
+        commissionEnabled,
+        commissionPercentage,
         recentActivities: [
           {
             id: `act-bde-${id}`,
-            text: `${converted} leads converted of ${target} monthly target`,
+            text: `${converted} leads converted of ${target} monthly target · ₹${leadRevenue.toLocaleString('en-IN')} revenue`,
             date: new Date().toISOString().split('T')[0],
           },
         ],
@@ -325,6 +403,8 @@ export function buildEmployees(
         studentCount: 0,
         convertedLeads: converted,
         monthlyTarget: target,
+        hoursThisWeek: 0,
+        leadRevenue,
       };
     }),
   ];
@@ -332,18 +412,32 @@ export function buildEmployees(
   return employees;
 }
 
-export function buildSchedules(batches: BatchRecord[], substitutes: Array<{ batchId: string; substituteTrainerId?: string; substituteTrainerName?: string; conflictWarning?: string }>) {
+export function buildSchedules(
+  batches: BatchRecord[],
+  substitutes: Array<{
+    batchId: string;
+    substituteTrainerId?: string;
+    substituteTrainerName?: string;
+    conflictWarning?: string;
+  }>,
+  trainers: TrainerRecord[] = []
+) {
+  const trainerByName = new Map(
+    trainers.map((t) => [(t.name || '').trim().toLowerCase(), String(t.id || t._id)])
+  );
+
   const scheduleItems = batches
     .filter((b) => b.mode !== 'online' || b.roomName)
     .map((batch) => {
       const meta = parseScheduleMeta(batch.schedule || '');
       const batchId = String(batch.id || batch._id);
       const stored = substitutes.find((s) => s.batchId === batchId);
+      const trainerName = batch.trainerName || '';
       return {
         id: batchId,
         batchId,
-        trainerId: '',
-        trainerName: batch.trainerName || '',
+        trainerId: trainerByName.get(trainerName.trim().toLowerCase()) || '',
+        trainerName,
         batchName: `${batch.courseName} (${batch.code})`,
         roomName: batch.roomName || batch.centerName || 'Room TBD',
         startTime: meta.startTime,
@@ -407,8 +501,9 @@ export function buildSummary(
   const releasedPayroll = payroll.filter((p) => p.status === 'Released').length;
   const openClaims = claims.filter((c) => c.status === 'Pending Approval' || c.status === 'Draft').length;
   const scheduleConflicts = schedules.filter((s) => s.conflictWarning).length;
-  const avgAttendance = employees.length
-    ? Math.round((employees.reduce((sum, emp) => sum + emp.attendancePct, 0) / employees.length) * 10) / 10
+  const withLogs = employees.filter((e) => e.hasAttendanceLogs);
+  const avgAttendance = withLogs.length
+    ? Math.round((withLogs.reduce((sum, emp) => sum + emp.attendancePct, 0) / withLogs.length) * 10) / 10
     : 0;
 
   return {
@@ -441,7 +536,13 @@ export function buildAlerts(
 
   employees.forEach((emp) => {
     const rule = commissionRules.find((r) => r.employeeId === emp.id);
-    const preview = computePayrollPreview(emp, rule, emp.batchCount || 0, emp.studentCount || 0);
+    const preview = computePayrollPreview(
+      emp,
+      rule,
+      emp.batchCount || 0,
+      emp.studentCount || 0,
+      emp.leadRevenue || 0
+    );
     if (preview.unpaidDays > 0) {
       alerts.push({
         type: 'penalty',
@@ -509,7 +610,7 @@ export function buildAlerts(
   }
 
   employees
-    .filter((e) => e.attendancePct < 85)
+    .filter((e) => e.hasAttendanceLogs && e.attendancePct < 85)
     .slice(0, 2)
     .forEach((emp) => {
       alerts.push({
@@ -537,38 +638,56 @@ export function buildAiInsights(
   const insights: Array<{ title: string; message: string; severity?: 'info' | 'warning' | 'success' }> = [];
 
   employees
-    .filter((e) => e.role === 'BDE' && 'convertedLeads' in e)
+    .filter((e) => e.role === 'BDE')
     .forEach((bde) => {
-      const converted = (bde as { convertedLeads?: number }).convertedLeads || 0;
-      const target = (bde as { monthlyTarget?: number }).monthlyTarget || 30;
-      const probability = Math.min(99, Math.round((converted / Math.max(target, 1)) * 100));
-      if (converted >= target * 0.7) {
+      const converted = bde.convertedLeads || 0;
+      const target = bde.monthlyTarget || 30;
+      if (converted <= 0) return;
+      if (converted >= target) {
         insights.push({
-          title: 'Incentive Eligibility alert',
-          message: `${bde.name} has converted ${converted} leads this target cycle. Expected incentive trigger probability: ${probability}%.`,
+          title: 'Conversion target met',
+          message: `${bde.name} converted ${converted}/${target} leads this month${
+            bde.leadRevenue ? ` (₹${bde.leadRevenue.toLocaleString('en-IN')} revenue)` : ''
+          }.`,
+          severity: 'success',
+        });
+      } else if (converted >= target * 0.7) {
+        insights.push({
+          title: 'Near conversion target',
+          message: `${bde.name} is at ${converted}/${target} conversions this month.`,
+          severity: 'info',
         });
       }
     });
 
   employees
-    .filter((e) => e.role === 'Trainer' && 'hoursThisWeek' in e && ((e as { hoursThisWeek?: number }).hoursThisWeek || 0) >= 30)
+    .filter((e) => e.role === 'Trainer' && (e.hoursThisWeek || 0) >= 30)
     .forEach((trainer) => {
-      const hours = (trainer as { hoursThisWeek?: number }).hoursThisWeek || 0;
-      const batchCount = (trainer as { batchCount?: number }).batchCount || 0;
       insights.push({
-        title: 'Faculty overload detector',
-        message: `${trainer.name} is conducting ${hours}+ hours per week across ${batchCount} batches. Recommendation: map secondary trainer to substitute slot.`,
+        title: 'High weekly load',
+        message: `${trainer.name} logged ${trainer.hoursThisWeek}+ hours across ${trainer.batchCount || 0} batches this week.`,
+        severity: 'warning',
       });
     });
 
   employees
-    .filter((e) => e.attendancePct < 92 && e.role === 'BDE')
-    .forEach((bde) => {
-      const lateRisk = Math.round(100 - bde.attendancePct);
+    .filter((e) => e.hasAttendanceLogs && e.attendancePct < 85)
+    .forEach((emp) => {
       insights.push({
-        title: 'Logistics attrition threat',
-        message: `Late logins for ${bde.name} increased by ${lateRisk}% this month. Attendance indexing shows risk stage. Recommendation: log 1-on-1 operational review.`,
+        title: 'Low attendance',
+        message: `${emp.name} is at ${emp.attendancePct}% (${emp.attendanceDays} logged days, ${emp.lateCount} late) this month.`,
         severity: 'warning',
+      });
+    });
+
+  employees
+    .filter((e) => !e.hasAttendanceLogs)
+    .slice(0, 3)
+    .forEach((emp) => {
+      insights.push({
+        title: 'No attendance logs',
+        message: `${emp.name} has no ${emp.role.toLowerCase()} attendance marked for this month — pay deductions are skipped until logs exist.`,
+        severity: 'info',
       });
     });
 
@@ -576,8 +695,8 @@ export function buildAiInsights(
     .filter((e) => e.role === 'Trainer' && (e.batchCount || 0) === 0)
     .forEach((trainer) => {
       insights.push({
-        title: 'Unassigned faculty capacity',
-        message: `${trainer.name} has no active batches mapped — consider reallocating to upcoming cohorts or reducing fixed payroll exposure.`,
+        title: 'Unassigned trainer',
+        message: `${trainer.name} has no active batches mapped.`,
         severity: 'info',
       });
     });
@@ -587,31 +706,18 @@ export function buildAiInsights(
     .slice(0, 2)
     .forEach((trainer) => {
       insights.push({
-        title: 'Top performer retention',
-        message: `${trainer.name} maintains ${trainer.performanceScore}/5 rating across ${trainer.batchCount} batches — eligible for retention bonus review.`,
+        title: 'Top-rated trainer',
+        message: `${trainer.name} has ${trainer.performanceScore}/5 rating across ${trainer.batchCount} batches.`,
         severity: 'success',
       });
     });
 
-  if (summary && insights.length < 4) {
+  if (summary && insights.length === 0 && summary.totalStaff > 0) {
     insights.push({
-      title: 'Payroll composition snapshot',
-      message: `${summary.trainerCount} trainers · ${summary.bdeCount} BDEs · ${summary.totalBatches} batches · ${summary.totalStudents} enrolled students feeding commission calculations.`,
+      title: 'Payroll cycle status',
+      message: `${summary.draftPayroll} draft · ${summary.pendingPayroll} pending · ${summary.releasedPayroll} released for ${summary.month}.`,
       severity: 'info',
     });
-    if (summary.releasedPayroll > 0) {
-      insights.push({
-        title: 'Disbursement progress',
-        message: `${summary.releasedPayroll} of ${summary.totalStaff} salary records already released for ${summary.month}.`,
-        severity: 'success',
-      });
-    } else if (summary.draftPayroll === summary.totalStaff && summary.totalStaff > 0) {
-      insights.push({
-        title: 'Cycle kickoff recommendation',
-        message: `All ${summary.totalStaff} payroll rows are still in Draft — run Submit Approval from Salary & Timeline to start the ${summary.month} cycle.`,
-        severity: 'warning',
-      });
-    }
   }
 
   return insights.slice(0, 6);
@@ -653,7 +759,13 @@ export function buildAutoPayrollDrafts(
 ) {
   return employees.map((emp) => {
     const rule = commissionRules.find((r) => r.employeeId === emp.id);
-    const preview = computePayrollPreview(emp, rule, emp.batchCount || 0, emp.studentCount || 0);
+    const preview = computePayrollPreview(
+      emp,
+      rule,
+      emp.batchCount || 0,
+      emp.studentCount || 0,
+      emp.leadRevenue || 0
+    );
     return {
       employeeId: emp.id,
       employeeType: emp.employeeType,
@@ -666,6 +778,8 @@ export function buildAutoPayrollDrafts(
       incentiveAdd: preview.inc,
       grossPayout: emp.baseSalary + emp.allowance + preview.overtime + preview.comm + preview.inc,
       netPayout: preview.net,
+      unpaidDays: preview.unpaidDays,
+      lateDays: preview.lateDays,
       status: 'Draft' as const,
       timeline: [] as Array<{ title: string; date: string; description: string }>,
     };

@@ -171,7 +171,15 @@ import { seedCenters } from './controllers/center.controller';
 import { seedStudents } from './controllers/student.controller';
 import roleRoutes from './routes/role.routes';
 import platformRoutes from './routes/platform.routes';
+import feeReminderRoutes from './routes/feeReminder.routes';
+import leadChatbotRoutes from './routes/leadChatbot.routes';
+import leadWebhookRoutes from './routes/leadWebhook.routes';
 import { seedSystemRoles } from './controllers/role.controller';
+import { startFeeReminderCron } from './jobs/feeReminder.cron';
+import { startLeadInboundCron } from './jobs/leadInbound.cron';
+import { startLeadReplyCron } from './jobs/leadReply.cron';
+import { startLeadFollowUpCron } from './jobs/leadFollowUp.cron';
+import { startCampaignCron } from './jobs/campaign.cron';
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -197,6 +205,9 @@ app.use('/api/session-feedback', sessionFeedbackRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/platform', platformRoutes);
+app.use('/api', feeReminderRoutes);
+app.use('/api', leadWebhookRoutes);
+app.use('/api/lead-chatbot', leadChatbotRoutes);
 
 
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -224,6 +235,11 @@ const startServer = async () => {
     await seedCenters();
     await seedStudents();
     await seedSystemRoles();
+    startFeeReminderCron();
+    startLeadInboundCron();
+    startLeadReplyCron();
+    startLeadFollowUpCron();
+    startCampaignCron();
   });
 };
 

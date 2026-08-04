@@ -51,7 +51,7 @@ async function upsertSystemAlerts(alerts: SystemAlert[]) {
           },
           $setOnInsert: { readBy: [] },
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: 'after' }
       )
     )
   );

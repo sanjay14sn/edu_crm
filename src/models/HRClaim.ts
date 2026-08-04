@@ -6,7 +6,7 @@ export interface IHRClaim extends Document {
   employeeName: string;
   title: string;
   amount: number;
-  category: 'Travel' | 'Internet' | 'Hardware' | 'Others';
+  category: 'Travel' | 'Food' | 'Fuel' | 'Office' | 'Internet' | 'Hardware' | 'Others';
   status: 'Draft' | 'Pending Approval' | 'Approved' | 'Rejected' | 'Released';
   billUrl?: string;
   date: string;
@@ -18,7 +18,7 @@ const HRClaimSchema = new Schema({
   employeeName: { type: String, required: true },
   title: { type: String, required: true },
   amount: { type: Number, required: true },
-  category: { type: String, enum: ['Travel', 'Internet', 'Hardware', 'Others'], default: 'Travel' },
+  category: { type: String, enum: ['Travel', 'Food', 'Fuel', 'Office', 'Internet', 'Hardware', 'Others'], default: 'Travel' },
   status: {
     type: String,
     enum: ['Draft', 'Pending Approval', 'Approved', 'Rejected', 'Released'],

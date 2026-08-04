@@ -31,7 +31,7 @@ export async function recordCloudinaryUpload(tenantId: string | undefined, bytes
       $set: { lastCloudinaryUploadAt: new Date() },
       $setOnInsert: { tenantId: id },
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 }
 
@@ -69,7 +69,7 @@ export async function recordAiTokenUsage(
       },
       $setOnInsert: { tenantId: id },
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   if (feature) {

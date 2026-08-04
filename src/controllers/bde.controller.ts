@@ -25,6 +25,7 @@ import HRPayroll from '../models/HRPayroll';
 import { LeadStage } from '../models/Lead';
 import { buildShiftPayload, formatShiftTime } from '../utils/shiftTimer';
 import { assertFeature } from '../utils/centerPolicy';
+import { queueOutreachForLead } from '../services/leadChatbot/outreach.service';
 
 type ShiftAction = 'login' | 'pause' | 'resume' | 'logout';
 
@@ -42,12 +43,14 @@ export const getLeads = async (req: AuthRequest, res: Response) => {
 
     const filter: Record<string, unknown> = {};
     if (req.user?.role === 'owner' && req.user.tenantId) {
-      filter.tenantId = req.user.tenantId;
+      filter.tenantId = tenantFilter(req.user.tenantId);
     }
     const leads = await Lead.find(filter).sort({ createdAt: -1 });
     res.status(200).json(await formatLeadsForResponse(leads, req.user?.tenantId));
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching leads', error });
+    const message = error instanceof Error ? error.message : 'Error fetching leads';
+    console.error('[getLeads]', message, error);
+    res.status(500).json({ message: `Error fetching leads: ${message}` });
   }
 };
 
@@ -66,6 +69,7 @@ export const createLead = async (req: AuthRequest, res: Response) => {
     }
     const lead = new Lead(leadData);
     const saved = await lead.save();
+    queueOutreachForLead(String(saved._id));
     res.status(201).json({ ...saved.toObject(), id: saved._id });
   } catch (error) {
     res.status(400).json({ message: 'Error creating lead', error });
@@ -183,6 +187,7 @@ export const importLeads = async (req: AuthRequest, res: Response) => {
 
         const saved = await lead.save();
         imported.push({ row: rowNum, id: saved._id, name, email });
+        queueOutreachForLead(String(saved._id));
       } catch {
         failed.push({ row: rowNum, reason: 'Invalid row data' });
       }

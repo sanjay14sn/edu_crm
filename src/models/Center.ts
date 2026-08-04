@@ -63,6 +63,8 @@ export interface ICenter extends Document {
   scholarshipTrackingEnabled?: boolean;
   allowStudentPortal?: boolean;
   allowLeadCsvImport?: boolean;
+  leadAutoReplyEnabled?: boolean;
+  leadFollowUpsEnabled?: boolean;
   allowBdeDirectConvert?: boolean;
   allowTrainerDeleteBatch?: boolean;
   enableCampaigns?: boolean;
@@ -81,6 +83,20 @@ export interface ICenter extends Document {
   requireOwnerTwoFactor?: boolean;
   dataRetentionDays?: number;
   ipWhitelist?: string;
+  leadChatbotEnabled?: boolean;
+  leadChatbotAutoOutreach?: boolean;
+  leadChatbotInboundEnabled?: boolean;
+  mailHost?: string;
+  mailPort?: number;
+  mailSecure?: boolean;
+  mailUsername?: string;
+  mailPassword?: string;
+  mailFrom?: string;
+  googleClientId?: string;
+  googleClientSecret?: string;
+  googleRedirectUri?: string;
+  googleRefreshToken?: string;
+  autoAiReply?: boolean;
 }
 
 const CenterSchema: Schema = new Schema(
@@ -147,6 +163,8 @@ const CenterSchema: Schema = new Schema(
     scholarshipTrackingEnabled: { type: Boolean, default: false },
     allowStudentPortal: { type: Boolean, default: true },
     allowLeadCsvImport: { type: Boolean, default: true },
+    leadAutoReplyEnabled: { type: Boolean, default: true },
+    leadFollowUpsEnabled: { type: Boolean, default: true },
     allowBdeDirectConvert: { type: Boolean, default: false },
     allowTrainerDeleteBatch: { type: Boolean, default: false },
     enableCampaigns: { type: Boolean, default: true },
@@ -165,6 +183,20 @@ const CenterSchema: Schema = new Schema(
     requireOwnerTwoFactor: { type: Boolean, default: false },
     dataRetentionDays: { type: Number, default: 365 },
     ipWhitelist: { type: String, default: '' },
+    leadChatbotEnabled: { type: Boolean },
+    leadChatbotAutoOutreach: { type: Boolean },
+    leadChatbotInboundEnabled: { type: Boolean },
+    mailHost: { type: String },
+    mailPort: { type: Number },
+    mailSecure: { type: Boolean },
+    mailUsername: { type: String },
+    mailPassword: { type: String },
+    mailFrom: { type: String },
+    googleClientId: { type: String },
+    googleClientSecret: { type: String },
+    googleRedirectUri: { type: String },
+    googleRefreshToken: { type: String },
+    autoAiReply: { type: Boolean },
   },
   { timestamps: true }
 );

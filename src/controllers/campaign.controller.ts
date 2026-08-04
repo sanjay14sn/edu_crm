@@ -5,6 +5,7 @@ import Lead from '../models/Lead';
 import Student from '../models/Student';
 import Trainer from '../models/Trainer';
 import { AuthRequest } from '../middleware/auth.middleware';
+import { sendCampaignEmails } from '../services/campaign.service';
 
 function tenantFilter(req: AuthRequest) {
   const filter: Record<string, string> = {};
@@ -117,6 +118,11 @@ export const createCampaign = async (req: AuthRequest, res: Response) => {
 
     const campaign = new Campaign(data);
     await campaign.save();
+
+    if (campaign.status === 'Active') {
+      void sendCampaignEmails(String(campaign._id));
+    }
+
     res.status(201).json(formatCampaign(campaign));
   } catch (error) {
     res.status(500).json({ message: 'Error creating campaign', error });
@@ -147,6 +153,11 @@ export const updateCampaign = async (req: AuthRequest, res: Response) => {
     if (!campaign) {
       return res.status(404).json({ message: 'Campaign not found' });
     }
+
+    if (campaign.status === 'Active') {
+      void sendCampaignEmails(String(campaign._id));
+    }
+
     res.status(200).json(formatCampaign(campaign));
   } catch (error) {
     res.status(500).json({ message: 'Error updating campaign', error });
