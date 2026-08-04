@@ -1,0 +1,15 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const batch_controller_1 = require("../controllers/batch.controller");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const router = (0, express_1.Router)();
+router.use(auth_middleware_1.verifyToken);
+router.get('/', batch_controller_1.getBatches);
+router.get('/:id', batch_controller_1.getBatchById);
+router.post('/', batch_controller_1.createBatch);
+router.put('/:id', batch_controller_1.updateBatch);
+router.put('/:id/remarks', batch_controller_1.updateBatchStudentRemarks);
+router.patch('/:id/status', batch_controller_1.updateBatchStatus);
+router.delete('/:id', batch_controller_1.deleteBatch);
+exports.default = router;

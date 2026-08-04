@@ -1,0 +1,16 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const feeReminder_controller_1 = require("../controllers/feeReminder.controller");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const router = (0, express_1.Router)();
+router.post('/webhooks/exotel/fee-reminder-status', feeReminder_controller_1.handleExotelFeeReminderWebhook);
+const protect = [auth_middleware_1.verifyToken, (0, auth_middleware_1.requireRole)(['owner', 'super_admin'])];
+router.get('/fees/reminders/targets', ...protect, feeReminder_controller_1.getFeeReminderTargets);
+router.get('/fees/reminders/calls', ...protect, feeReminder_controller_1.getFeeReminderCalls);
+router.post('/fees/reminders/call', ...protect, feeReminder_controller_1.callFeeReminders);
+router.post('/fees/reminders/call-all', ...protect, feeReminder_controller_1.callAllFeeReminders);
+router.get('/fees/reminders/emails', ...protect, feeReminder_controller_1.getFeeReminderEmails);
+router.post('/fees/reminders/email', ...protect, feeReminder_controller_1.sendFeeReminderEmails);
+router.post('/fees/reminders/email-all', ...protect, feeReminder_controller_1.sendAllFeeReminderEmails);
+exports.default = router;

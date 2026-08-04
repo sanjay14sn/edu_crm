@@ -1,0 +1,14 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const centerPolicy_middleware_1 = require("../middleware/centerPolicy.middleware");
+const lmsUpload_middleware_1 = require("../middleware/lmsUpload.middleware");
+const upload_controller_1 = require("../controllers/upload.controller");
+const lms_controller_1 = require("../controllers/lms.controller");
+const router = (0, express_1.Router)();
+router.use(auth_middleware_1.verifyToken);
+router.post('/generate', (0, centerPolicy_middleware_1.requireCenterFeature)('enableLmsAiTutor'), lms_controller_1.generateLmsContent);
+router.post('/video-metadata', lms_controller_1.resolveVideoMetadata);
+router.post('/batches/:batchId/upload', lmsUpload_middleware_1.lmsUpload.single('file'), upload_controller_1.uploadLmsMedia);
+exports.default = router;

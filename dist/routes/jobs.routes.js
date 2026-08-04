@@ -1,0 +1,17 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const jobs_controller_1 = require("../controllers/jobs.controller");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const centerPolicy_middleware_1 = require("../middleware/centerPolicy.middleware");
+const router = (0, express_1.Router)();
+router.use(auth_middleware_1.verifyToken);
+router.use((0, centerPolicy_middleware_1.requireCenterFeature)('enableJobPortal'));
+router.get('/', jobs_controller_1.getJobs);
+router.post('/generate', (0, auth_middleware_1.requireRole)(['super_admin', 'owner', 'trainer']), jobs_controller_1.generateJobContent);
+router.post('/', (0, auth_middleware_1.requireRole)(['super_admin', 'owner', 'trainer']), jobs_controller_1.createJob);
+router.delete('/:id', (0, auth_middleware_1.requireRole)(['super_admin', 'owner', 'trainer']), jobs_controller_1.deleteJob);
+router.post('/:id/apply', (0, auth_middleware_1.requireRole)(['student']), jobs_controller_1.applyForJob);
+router.get('/applications', jobs_controller_1.getApplications);
+router.put('/applications/:id/status', (0, auth_middleware_1.requireRole)(['super_admin', 'owner', 'trainer']), jobs_controller_1.updateApplicationStatus);
+exports.default = router;

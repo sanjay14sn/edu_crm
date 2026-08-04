@@ -1,0 +1,13 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const bdeAdmin_controller_1 = require("../controllers/bdeAdmin.controller");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const router = (0, express_1.Router)();
+router.use(auth_middleware_1.verifyToken);
+router.use((0, auth_middleware_1.requireRole)(['super_admin', 'owner']));
+router.get('/', bdeAdmin_controller_1.getBDEs);
+router.post('/', bdeAdmin_controller_1.createBDE);
+router.put('/:id', bdeAdmin_controller_1.updateBDE);
+router.delete('/:id', bdeAdmin_controller_1.deleteBDE);
+exports.default = router;

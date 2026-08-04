@@ -1,0 +1,18 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const leadChatbot_controller_1 = require("../controllers/leadChatbot.controller");
+const router = (0, express_1.Router)();
+router.use(auth_middleware_1.verifyToken);
+router.use((0, auth_middleware_1.requireRole)(['super_admin', 'owner', 'bde']));
+router.get('/gmail/status', leadChatbot_controller_1.getGmailChatbotStatus);
+router.post('/gmail/reconnect', leadChatbot_controller_1.reconnectGmail);
+router.get('/settings', leadChatbot_controller_1.getLeadChatbotGlobalSettings);
+router.patch('/settings', (0, auth_middleware_1.requireRole)(['super_admin', 'owner']), leadChatbot_controller_1.updateLeadChatbotGlobalSettings);
+router.post('/inbound/scan', leadChatbot_controller_1.runInboundScanNow);
+router.post('/replies/scan', leadChatbot_controller_1.runReplyScanNow);
+router.get('/leads/:leadId/chat', leadChatbot_controller_1.getLeadChat);
+router.post('/leads/:leadId/chat/reply', leadChatbot_controller_1.sendLeadChatReply);
+router.post('/leads/:leadId/chat/outreach', leadChatbot_controller_1.triggerLeadOutreach);
+exports.default = router;

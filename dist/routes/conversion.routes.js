@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const conversion_controller_1 = require("../controllers/conversion.controller");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const router = (0, express_1.Router)();
+router.use(auth_middleware_1.verifyToken);
+router.get('/requests', (0, auth_middleware_1.requireRole)(['owner', 'super_admin', 'bde']), conversion_controller_1.getConversionRequests);
+router.post('/requests', (0, auth_middleware_1.requireRole)(['bde']), conversion_controller_1.createConversionRequest);
+router.put('/requests/:id/approve', (0, auth_middleware_1.requireRole)(['owner', 'super_admin']), conversion_controller_1.approveConversionRequest);
+router.put('/requests/:id/reject', (0, auth_middleware_1.requireRole)(['owner', 'super_admin']), conversion_controller_1.rejectConversionRequest);
+exports.default = router;

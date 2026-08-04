@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_middleware_1 = require("../middleware/auth.middleware");
+const sessionFeedback_controller_1 = require("../controllers/sessionFeedback.controller");
+const router = (0, express_1.Router)();
+router.use(auth_middleware_1.verifyToken);
+router.get('/pending', (0, auth_middleware_1.requireRole)(['student']), sessionFeedback_controller_1.getPendingSessionFeedback);
+router.post('/', (0, auth_middleware_1.requireRole)(['student']), sessionFeedback_controller_1.submitSessionFeedback);
+router.get('/me', (0, auth_middleware_1.requireRole)(['trainer']), sessionFeedback_controller_1.getMyTrainerSessionFeedback);
+router.get('/trainer/:trainerId', (0, auth_middleware_1.requireRole)(['owner', 'super_admin', 'trainer']), sessionFeedback_controller_1.getTrainerSessionFeedback);
+exports.default = router;
