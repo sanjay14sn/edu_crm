@@ -33,7 +33,7 @@ const NotificationSchema: Schema = new Schema(
     tenantId: { type: String },
     targetRoles: {
       type: [String],
-      enum: ['super_admin', 'owner', 'trainer', 'student', 'bde'],
+      enum: ['super_admin', 'owner', 'trainer', 'student', 'bde', 'employee'],
       default: [],
     },
     targetUserId: { type: String },

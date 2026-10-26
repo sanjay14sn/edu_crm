@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import User from '../models/User';
 import Student from '../models/Student';
+import HREmployee from '../models/HREmployee';
 import { getCenterByTenant, isFeatureEnabled } from '../utils/centerPolicy';
 
 const SUPER_ADMIN = {
@@ -114,6 +115,16 @@ export const login = async (req: Request, res: Response) => {
         return res.status(403).json({
           message: 'Student portal access is disabled for your institute. Please contact your center.',
           code: 'PORTAL_DISABLED',
+        });
+      }
+    }
+
+    if (user.role === 'employee') {
+      const employee = await HREmployee.findOne({ userId: user._id.toString() });
+      if (!employee || employee.status === 'exited') {
+        return res.status(403).json({
+          message: 'Your employee account is inactive. Please contact HR.',
+          code: 'ACCESS_DENIED',
         });
       }
     }

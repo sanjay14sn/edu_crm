@@ -1,3 +1,9 @@
+import dns from "dns";
+try {
+  dns.setServers(["8.8.8.8", "8.8.4.4", "1.1.1.1"]);
+} catch (e) {
+  // Ignore in environments where setting servers is restricted
+}
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -174,6 +180,7 @@ import platformRoutes from './routes/platform.routes';
 import feeReminderRoutes from './routes/feeReminder.routes';
 import leadChatbotRoutes from './routes/leadChatbot.routes';
 import leadWebhookRoutes from './routes/leadWebhook.routes';
+import employeePortalRoutes from './routes/employeePortal.routes';
 import { seedSystemRoles } from './controllers/role.controller';
 import { startFeeReminderCron } from './jobs/feeReminder.cron';
 import { startLeadInboundCron } from './jobs/leadInbound.cron';
@@ -194,6 +201,7 @@ app.use('/api/trainers', trainerRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/courses', courseRoutes);
 app.use('/api/hr', hrRoutes);
+app.use('/api/employee-portal', employeePortalRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/conversions', conversionRoutes);
 app.use('/api/reports', reportsRoutes);

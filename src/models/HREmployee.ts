@@ -23,6 +23,8 @@ export interface IHREmployee extends Document {
   exitDate?: string;
   exitReason?: string;
   baseSalary: number;
+  /** Portal login (User with role "employee") for staff outside Trainer/BDE */
+  userId?: string;
 }
 
 const HREmployeeSchema = new Schema(
@@ -49,6 +51,7 @@ const HREmployeeSchema = new Schema(
     exitDate: { type: String },
     exitReason: { type: String },
     baseSalary: { type: Number, default: 0 },
+    userId: { type: String },
   },
   { timestamps: true }
 );

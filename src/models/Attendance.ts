@@ -3,7 +3,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface IAttendance extends Document {
   tenantId: string;
   date: string; // YYYY-MM-DD
-  type: 'student' | 'trainer' | 'bde';
+  type: 'student' | 'trainer' | 'bde' | 'employee';
   entityId: string;
   name: string;
   status: 'present' | 'absent' | 'late';
@@ -14,12 +14,13 @@ export interface IAttendance extends Document {
   logoutAt?: string;
   pausedAt?: string;
   totalPausedSeconds?: number;
+  workMode?: 'office' | 'remote' | 'field';
 }
 
 const AttendanceSchema: Schema = new Schema({
   tenantId: { type: String, required: true },
   date: { type: String, required: true },
-  type: { type: String, enum: ['student', 'trainer', 'bde'], required: true },
+  type: { type: String, enum: ['student', 'trainer', 'bde', 'employee'], required: true },
   entityId: { type: String, required: true },
   name: { type: String, required: true },
   status: { type: String, enum: ['present', 'absent', 'late'], default: 'present' },
@@ -30,6 +31,7 @@ const AttendanceSchema: Schema = new Schema({
   logoutAt: { type: String },
   pausedAt: { type: String },
   totalPausedSeconds: { type: Number, default: 0 },
+  workMode: { type: String, enum: ['office', 'remote', 'field'] },
 }, { timestamps: true });
 
 // Ensure unique index per date, type, and entityId under a tenant

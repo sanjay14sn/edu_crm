@@ -1,24 +1,34 @@
 import { Response } from 'express';
+import mongoose from 'mongoose';
+import bcrypt from 'bcryptjs';
 import Trainer from '../models/Trainer';
 import User from '../models/User';
 import BDEProfile from '../models/BDEProfile';
 import Attendance from '../models/Attendance';
 import HREmployee from '../models/HREmployee';
 import HRHoliday from '../models/HRHoliday';
-import HRSalaryStructure from '../models/HRSalaryStructure';
+import HRSalaryStructure, {
+  customComponentTotal,
+  structureGross,
+  type ICustomSalaryComponent,
+  type ISalaryComponentRule,
+  type SalaryComponentMode,
+} from '../models/HRSalaryStructure';
 import { HRLeavePolicy, HRLeaveBalance, HRLeaveRequest } from '../models/HRLeave';
 import HRPayroll from '../models/HRPayroll';
 import HRClaim from '../models/HRClaim';
-import HRDocument from '../models/HRDocument';
+import HRDocument, { HR_DOCUMENT_CATEGORIES, type HRDocumentCategory } from '../models/HRDocument';
 import { AuthRequest } from '../middleware/auth.middleware';
 
-function tenantFilter(tenantId?: string) {
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export function tenantFilter(tenantId?: string) {
   if (!tenantId) return {};
   const escaped = tenantId.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return { tenantId: { $regex: new RegExp(`^${escaped}\\s*$`, 'i') } };
 }
 
-function todayStr() {
+export function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
@@ -27,7 +37,7 @@ function monthPrefix(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-function daysBetween(start: string, end: string) {
+export function daysBetween(start: string, end: string) {
   const a = new Date(`${start}T00:00:00`);
   const b = new Date(`${end}T00:00:00`);
   const diff = Math.round((b.getTime() - a.getTime()) / 86400000);
@@ -148,7 +158,7 @@ function annualEntitlement(days: number, basis: 'yearly' | 'monthly' | undefined
   return basis === 'monthly' ? n * 12 : n;
 }
 
-async function ensureLeaveBalance(tenantId: string | undefined, employeeId: string, year: number) {
+export async function ensureLeaveBalance(tenantId: string | undefined, employeeId: string, year: number) {
   let policy = await HRLeavePolicy.findOne(tenantFilter(tenantId));
   if (!policy) {
     policy = await HRLeavePolicy.create({
@@ -175,9 +185,148 @@ async function ensureLeaveBalance(tenantId: string | undefined, employeeId: stri
   return balance;
 }
 
-function serializeEmployee(doc: InstanceType<typeof HREmployee>) {
-  return { ...doc.toObject(), id: doc._id.toString() };
+export function serializeEmployee(doc: InstanceType<typeof HREmployee>) {
+  return { ...doc.toObject(), id: doc._id.toString(), portalAccess: Boolean(doc.userId) };
 }
+
+function avatarFromName(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((n) => n[0])
+    .join('')
+    .toUpperCase()
+    .substring(0, 2);
+}
+
+/** Returns an error message when the email cannot be used for this employee's login. */
+async function portalEmailConflict(email: string, currentUserId?: string) {
+  const existing = await User.findOne({ email });
+  if (existing && existing._id.toString() !== currentUserId) {
+    return 'This email is already used by another login';
+  }
+  return null;
+}
+
+async function upsertEmployeeLogin(
+  emp: InstanceType<typeof HREmployee>,
+  email: string,
+  password: string,
+  tenantId?: string
+) {
+  const hashed = await bcrypt.hash(password, await bcrypt.genSalt(10));
+  const existing = emp.userId ? await User.findById(emp.userId) : null;
+  if (existing) {
+    existing.email = email;
+    existing.name = emp.name;
+    existing.password = hashed;
+    await existing.save();
+    return existing;
+  }
+  const user = await User.create({
+    name: emp.name,
+    email,
+    password: hashed,
+    role: 'employee',
+    tenantId,
+    avatar: avatarFromName(emp.name),
+  });
+  emp.userId = user._id.toString();
+  if (!emp.email) emp.email = email;
+  await emp.save();
+  return user;
+}
+
+export const createEmployee = async (req: AuthRequest, res: Response) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ message: 'Name is required' });
+
+    const portalPassword = String(req.body.portalPassword || '');
+    const portalEmail = String(req.body.email || '').trim().toLowerCase();
+    if (portalPassword) {
+      if (!portalEmail) {
+        return res.status(400).json({ message: 'Email is required to enable portal login' });
+      }
+      if (portalPassword.length < 4) {
+        return res.status(400).json({ message: 'Portal password must be at least 4 characters' });
+      }
+      const conflict = await portalEmailConflict(portalEmail);
+      if (conflict) return res.status(409).json({ message: conflict });
+    }
+
+    const sourceId = `manual-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const employeeCode =
+      String(req.body.employeeCode || '').trim() || `EMP-${sourceId.slice(-6).toUpperCase()}`;
+
+    const existingCode = await HREmployee.findOne({
+      ...tenantFilter(req.user?.tenantId),
+      employeeCode,
+    });
+    if (existingCode) {
+      return res.status(409).json({ message: 'Employee code already exists' });
+    }
+
+    const employmentTypes = ['Full-Time', 'Part-Time', 'Contract', 'Intern'];
+    const employmentType = employmentTypes.includes(req.body.employmentType)
+      ? req.body.employmentType
+      : 'Full-Time';
+
+    const emp = await HREmployee.create({
+      tenantId: req.user?.tenantId,
+      sourceType: 'manual',
+      sourceId,
+      employeeCode,
+      name,
+      email: String(req.body.email || '').trim(),
+      phone: String(req.body.phone || '').trim(),
+      department: String(req.body.department || 'General').trim() || 'General',
+      designation: String(req.body.designation || 'Staff').trim() || 'Staff',
+      branch: String(req.body.branch || 'Main Campus').trim() || 'Main Campus',
+      employmentType,
+      joiningDate: req.body.joiningDate || todayStr(),
+      reportingManager: String(req.body.reportingManager || 'Center Admin').trim() || 'Center Admin',
+      dateOfBirth: req.body.dateOfBirth || undefined,
+      status: 'active',
+      baseSalary: Number(req.body.baseSalary) || 0,
+    });
+
+    if (portalPassword) {
+      await upsertEmployeeLogin(emp, portalEmail, portalPassword, req.user?.tenantId);
+    }
+
+    res.status(201).json(serializeEmployee(emp));
+  } catch (error) {
+    res.status(500).json({ message: 'Error creating employee', error });
+  }
+};
+
+export const setEmployeePortalAccess = async (req: AuthRequest, res: Response) => {
+  try {
+    const emp = await HREmployee.findOne({ _id: req.params.id, ...tenantFilter(req.user?.tenantId) });
+    if (!emp) return res.status(404).json({ message: 'Employee not found' });
+    if (emp.sourceType !== 'manual') {
+      return res.status(400).json({
+        message: 'Trainers and BDEs sign in through their own portals',
+      });
+    }
+
+    const email = String(req.body.email || emp.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    if (!email) return res.status(400).json({ message: 'Email is required' });
+    if (password.length < 4) {
+      return res.status(400).json({ message: 'Password must be at least 4 characters' });
+    }
+
+    const conflict = await portalEmailConflict(email, emp.userId);
+    if (conflict) return res.status(409).json({ message: conflict });
+
+    await upsertEmployeeLogin(emp, email, password, req.user?.tenantId);
+    res.status(200).json(serializeEmployee(emp));
+  } catch (error) {
+    res.status(500).json({ message: 'Error updating portal access', error });
+  }
+};
 
 export const listEmployees = async (req: AuthRequest, res: Response) => {
   try {
@@ -190,12 +339,7 @@ export const listEmployees = async (req: AuthRequest, res: Response) => {
       employees.map(async (emp) => {
         const structure = byEmp.get(emp._id.toString());
         if (!structure) return;
-        const gross =
-          (structure.basic || 0) +
-          (structure.hra || 0) +
-          (structure.allowances || 0) +
-          (structure.incentives || 0) +
-          (structure.bonuses || 0);
+        const gross = structureGross(structure);
         if (emp.baseSalary !== gross) {
           emp.baseSalary = gross;
           await emp.save();
@@ -252,17 +396,25 @@ export const updateEmployee = async (req: AuthRequest, res: Response) => {
         ...tenantFilter(req.user?.tenantId),
       });
       if (structure) {
-        const otherEarnings =
-          (structure.hra || 0) +
-          (structure.allowances || 0) +
-          (structure.incentives || 0) +
-          (structure.bonuses || 0);
+        const otherEarnings = structureGross(structure) - (structure.basic || 0);
         structure.basic = Math.max(0, gross - otherEarnings);
+        // Amounts were edited outside the builder, so percentage rules no longer apply
+        structure.ctc = gross;
+        structure.rules = {};
+        structure.customComponents = (structure.customComponents || []).map((c) => ({
+          name: c.name,
+          kind: c.kind,
+          mode: 'fixed' as const,
+          value: c.amount,
+          amount: c.amount,
+        }));
+        structure.markModified('rules');
         await structure.save();
       } else {
         await HRSalaryStructure.create({
           tenantId: req.user?.tenantId,
           employeeId: emp._id.toString(),
+          ctc: gross,
           basic: gross,
           hra: 0,
           allowances: 0,
@@ -312,7 +464,7 @@ export const getDashboard = async (req: AuthRequest, res: Response) => {
 
     const attendanceToday = await Attendance.find({
       ...tenantFilter(tenantId),
-      type: { $in: ['trainer', 'bde'] },
+      type: { $in: ['trainer', 'bde', 'employee'] },
       date: today,
     });
 
@@ -483,6 +635,35 @@ export const listLeaveBalances = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const updateLeaveBalance = async (req: AuthRequest, res: Response) => {
+  try {
+    const casual = Number(req.body.casual);
+    const sick = Number(req.body.sick);
+    const earned = Number(req.body.earned);
+    if ([casual, sick, earned].some((n) => !Number.isFinite(n) || n < 0)) {
+      return res.status(400).json({ message: 'Casual, sick, and earned must be zero or more' });
+    }
+
+    const balance = await HRLeaveBalance.findOneAndUpdate(
+      { _id: req.params.id, ...tenantFilter(req.user?.tenantId) },
+      { casual, sick, earned },
+      { returnDocument: 'after' }
+    );
+    if (!balance) return res.status(404).json({ message: 'Leave balance not found' });
+
+    res.status(200).json({
+      id: balance._id.toString(),
+      employeeId: balance.employeeId,
+      year: balance.year,
+      casual: balance.casual,
+      sick: balance.sick,
+      earned: balance.earned,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error updating leave balance', error });
+  }
+};
+
 export const listLeaveRequests = async (req: AuthRequest, res: Response) => {
   try {
     const filter: Record<string, unknown> = { ...tenantFilter(req.user?.tenantId) };
@@ -596,11 +777,38 @@ export const upsertSalaryStructure = async (req: AuthRequest, res: Response) => 
     const professionalTax = Number(rest.professionalTax) || 0;
     const tds = Number(rest.tds) || 0;
     const otherDeductions = Number(rest.otherDeductions) || 0;
-    const gross = basic + hra + allowances + incentives + bonuses;
+    const modes: SalaryComponentMode[] = ['fixed', 'ctc', 'basic', 'gross', 'balance'];
+    const toMode = (m: unknown): SalaryComponentMode =>
+      modes.includes(m as SalaryComponentMode) ? (m as SalaryComponentMode) : 'fixed';
+
+    const rules: Record<string, ISalaryComponentRule> = {};
+    if (rest.rules && typeof rest.rules === 'object') {
+      for (const [key, rule] of Object.entries(rest.rules as Record<string, any>)) {
+        rules[key] = { mode: toMode(rule?.mode), value: Number(rule?.value) || 0 };
+      }
+    }
+    const customComponents: ICustomSalaryComponent[] = Array.isArray(rest.customComponents)
+      ? rest.customComponents
+          .filter((c: any) => String(c?.name || '').trim())
+          .map((c: any) => ({
+            name: String(c.name).trim(),
+            kind: c.kind === 'deduction' ? 'deduction' : 'earning',
+            mode: toMode(c.mode),
+            value: Number(c.value) || 0,
+            amount: Math.max(0, Number(c.amount) || 0),
+          }))
+      : [];
+
+    const gross =
+      basic + hra + allowances + incentives + bonuses + customComponentTotal({ customComponents }, 'earning');
+    const ctc = Number(rest.ctc) || gross;
 
     const row = await HRSalaryStructure.findOneAndUpdate(
       { employeeId, ...tenantFilter(req.user?.tenantId) },
       {
+        ctc,
+        rules,
+        customComponents,
         basic,
         hra,
         allowances,
@@ -633,11 +841,82 @@ export const upsertSalaryStructure = async (req: AuthRequest, res: Response) => 
 export const listDocuments = async (req: AuthRequest, res: Response) => {
   try {
     const filter: Record<string, unknown> = { ...tenantFilter(req.user?.tenantId) };
-    if (req.query.employeeId) filter.employeeId = req.query.employeeId;
+    if (req.query.employeeId) filter.employeeId = String(req.query.employeeId);
+
+    if (req.user?.role === 'trainer' || req.user?.role === 'bde') {
+      const employees = await syncHREmployees(req.user?.tenantId, req.user?.role);
+      const user = await User.findById(req.user.id);
+      const me =
+        employees.find((e) => e.sourceId === req.user?.id) ||
+        employees.find((e) => user && e.name.toLowerCase() === user.name.toLowerCase());
+      if (!me) return res.status(200).json([]);
+      filter.employeeId = me._id.toString();
+      filter.sharedWithEmployee = { $ne: false };
+    }
+
     const docs = await HRDocument.find(filter).sort({ createdAt: -1 });
     res.status(200).json(docs.map((d) => ({ ...d.toObject(), id: d._id.toString() })));
   } catch (error) {
     res.status(500).json({ message: 'Error listing documents', error });
+  }
+};
+
+export const createDocument = async (req: AuthRequest, res: Response) => {
+  try {
+    const employeeId = String(req.body.employeeId || '');
+    const name = String(req.body.name || '').trim();
+    const url = String(req.body.url || '').trim();
+    const category = String(req.body.category || 'Contract');
+    if (!employeeId || !name || !url) {
+      return res.status(400).json({ message: 'Employee, document name and file are required' });
+    }
+    if (!/^https?:\/\//i.test(url)) return res.status(400).json({ message: 'Invalid file URL' });
+    if (!(HR_DOCUMENT_CATEGORIES as readonly string[]).includes(category)) {
+      return res.status(400).json({ message: 'Invalid document category' });
+    }
+    if (!mongoose.isValidObjectId(employeeId)) return res.status(404).json({ message: 'Employee not found' });
+    const emp = await HREmployee.findOne({ _id: employeeId, ...tenantFilter(req.user?.tenantId) });
+    if (!emp) return res.status(404).json({ message: 'Employee not found' });
+
+    const uploader = await User.findById(req.user?.id).select('name');
+    const doc = await HRDocument.create({
+      tenantId: req.user?.tenantId,
+      employeeId,
+      name,
+      category: category as HRDocumentCategory,
+      url,
+      size: String(req.body.size || '').trim() || undefined,
+      uploadDate: DATE_ONLY_RE.test(String(req.body.uploadDate || '')) ? String(req.body.uploadDate) : todayStr(),
+      sharedWithEmployee: req.body.sharedWithEmployee !== false,
+      uploadedByName: uploader?.name,
+    });
+    res.status(201).json({ ...doc.toObject(), id: doc._id.toString() });
+  } catch (error) {
+    res.status(500).json({ message: 'Error uploading document', error });
+  }
+};
+
+export const updateDocumentSharing = async (req: AuthRequest, res: Response) => {
+  try {
+    const doc = await HRDocument.findOneAndUpdate(
+      { _id: req.params.id, ...tenantFilter(req.user?.tenantId) },
+      { sharedWithEmployee: Boolean(req.body.sharedWithEmployee) },
+      { returnDocument: 'after' }
+    );
+    if (!doc) return res.status(404).json({ message: 'Document not found' });
+    res.status(200).json({ ...doc.toObject(), id: doc._id.toString() });
+  } catch (error) {
+    res.status(500).json({ message: 'Error updating document', error });
+  }
+};
+
+export const deleteDocument = async (req: AuthRequest, res: Response) => {
+  try {
+    const doc = await HRDocument.findOneAndDelete({ _id: req.params.id, ...tenantFilter(req.user?.tenantId) });
+    if (!doc) return res.status(404).json({ message: 'Document not found' });
+    res.status(200).json({ message: 'Document deleted' });
+  } catch (error) {
+    res.status(500).json({ message: 'Error deleting document', error });
   }
 };
 
@@ -707,6 +986,7 @@ export const getMyHR = async (req: AuthRequest, res: Response) => {
     const docs = await HRDocument.find({
       ...tenantFilter(req.user?.tenantId),
       employeeId,
+      sharedWithEmployee: { $ne: false },
     }).sort({ createdAt: -1 });
     const payroll = await HRPayroll.find({
       ...tenantFilter(req.user?.tenantId),
@@ -744,7 +1024,7 @@ export const getReportsBundle = async (req: AuthRequest, res: Response) => {
     const employees = await syncHREmployees(req.user?.tenantId, req.user?.role);
     const attendance = await Attendance.find({
       ...tenantFilter(req.user?.tenantId),
-      type: { $in: ['trainer', 'bde'] },
+      type: { $in: ['trainer', 'bde', 'employee'] },
       date: { $regex: `^${month}` },
     });
     const leave = await HRLeaveRequest.find({

@@ -4,6 +4,7 @@ import Student from '../models/Student';
 import User from '../models/User';
 import Trainer from '../models/Trainer';
 import BDEProfile from '../models/BDEProfile';
+import HREmployee from '../models/HREmployee';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { buildShiftPayload, parseManualShiftTime } from '../utils/shiftTimer';
 import { tenantFilter } from '../utils/bdeStats';
@@ -48,6 +49,17 @@ async function listStaffForType(tenantId: string | undefined, type: string, role
         return (profile?.status || 'active') !== 'inactive';
       })
       .map((u) => ({ entityId: u._id.toString(), name: u.name }));
+  }
+
+  if (type === 'employee') {
+    const filter: Record<string, unknown> = { sourceType: 'manual', status: 'active' };
+    if (role !== 'super_admin' && tenantId) filter.tenantId = tenantFilter(tenantId);
+    const employees = await HREmployee.find(filter);
+    return employees.map((e) => ({
+      entityId: e.sourceId,
+      name: e.name,
+      joiningDate: e.joiningDate,
+    }));
   }
 
   return [];
@@ -199,11 +211,13 @@ export const finalizeAttendanceMonth = async (req: AuthRequest, res: Response) =
   try {
     const month = String(req.body.month || '');
     const typeRaw = String(req.body.type || '');
-    if (!/^\d{4}-\d{2}$/.test(month) || !['trainer', 'bde'].includes(typeRaw)) {
-      return res.status(400).json({ message: 'month (YYYY-MM) and type (trainer|bde) are required' });
+    if (!/^\d{4}-\d{2}$/.test(month) || !['trainer', 'bde', 'employee'].includes(typeRaw)) {
+      return res
+        .status(400)
+        .json({ message: 'month (YYYY-MM) and type (trainer|bde|employee) are required' });
     }
 
-    const type = typeRaw as 'trainer' | 'bde';
+    const type = typeRaw as 'trainer' | 'bde' | 'employee';
     const tenantId = req.user?.tenantId || 'ERP';
     const staff = await listStaffForType(req.user?.tenantId, type, req.user?.role);
     if (staff.length === 0) {
@@ -230,7 +244,8 @@ export const finalizeAttendanceMonth = async (req: AuthRequest, res: Response) =
       const date = `${month}-${String(day).padStart(2, '0')}`;
       if (date >= today) continue; // only past days (EOD already passed)
 
-      for (const person of staff) {
+      for (const person of staff as { entityId: string; name: string; joiningDate?: string }[]) {
+        if (person.joiningDate && date < person.joiningDate.slice(0, 10)) continue;
         const key = `${date}:${person.entityId}`;
         const record = byKey.get(key);
         if (wasPresentOrPunched(record)) continue;
